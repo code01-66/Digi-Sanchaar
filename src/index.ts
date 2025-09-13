@@ -1,3 +1,4 @@
+
 import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
@@ -134,7 +135,7 @@ app.post('/api/trigger-sos', async (req, res) => {
     console.log(`Attempting to call formatted number: ${formattedPhone}`);
     try {
       await twilioClient.calls.create({
-        twiml: `<Response><Say>This is an urgent automated alert from DigiSanchaar. ${userName} has triggered an S O S. Their last known location is available via email. Please check your email and contact them or the authorities immediately.</Say></Response>`,
+        twiml: `<Response><Say>Urgent alert from DigiSanchaar. ${userName} has triggered an SOS. Please check your email for details.</Say></Response>`,
         to: formattedPhone,
         from: TWILIO_PHONE_NUMBER,
       });
@@ -162,3 +163,4 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`SOS Backend server listening on port ${port}`);
 });
+
