@@ -36,6 +36,19 @@ const SosRequestSchema = z.object({
   }),
 });
 
+// --- Helper function to format phone numbers ---
+const formatPhoneNumber = (phone: string) => {
+    // If it already starts with a +, assume it's in the correct E.164 format
+    if (phone.trim().startsWith('+')) {
+        return phone.trim();
+    }
+    
+    // Otherwise, remove all non-digit characters and assume it's an Indian number
+    const cleaned = phone.replace(/\D/g, '');
+    return `+91${cleaned}`;
+};
+
+
 // --- API Endpoint ---
 app.post('/api/trigger-sos', async (req, res) => {
   console.log('Received SOS request...');
@@ -61,6 +74,7 @@ app.post('/api/trigger-sos', async (req, res) => {
     TWILIO_AUTH_TOKEN,
     TWILIO_PHONE_NUMBER,
     RESEND_API_KEY,
+    RESEND_FROM_EMAIL, // New optional variable
   } = process.env;
 
   if (
@@ -77,6 +91,8 @@ app.post('/api/trigger-sos', async (req, res) => {
 
   const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
   const resendClient = new Resend(RESEND_API_KEY);
+  const fromEmail = RESEND_FROM_EMAIL || 'DigiSanchaar Alert <onboarding@resend.dev>';
+
 
   // 3. Send Notifications
   let emailsSent = 0;
@@ -87,8 +103,8 @@ app.post('/api/trigger-sos', async (req, res) => {
   for (const contact of emergencyContacts) {
     // Send Email via Resend
     try {
-      await resendClient.emails.send({
-        from: 'DigiSanchaar Alert <onboarding@resend.dev>',
+      const { data, error } = await resendClient.emails.send({
+        from: fromEmail,
         to: contact.email,
         subject: `URGENT: SOS Alert from ${userName}`,
         html: `
@@ -99,17 +115,24 @@ app.post('/api/trigger-sos', async (req, res) => {
           <p>Please attempt to contact them or the authorities immediately.</p>
         `,
       });
+
+      if (error) {
+          throw error;
+      }
+
       emailsSent++;
-      console.log(`Email sent to ${contact.email}`);
-    } catch (error) {
-      console.error(`Failed to send email to ${contact.email}:`, error);
+      console.log(`Email sent successfully to ${contact.email}. ID: ${data?.id}`);
+    } catch (error: any) {
+      console.error(`Failed to send email to ${contact.email}. Full error:`, JSON.stringify(error, null, 2));
     }
 
     // Make Call via Twilio
+    const formattedPhone = formatPhoneNumber(contact.phone);
+    console.log(`Attempting to call formatted number: ${formattedPhone}`);
     try {
       await twilioClient.calls.create({
         twiml: `<Response><Say>This is an urgent automated alert from DigiSanchaar. ${userName} has triggered an S O S. Their last known location is available via email. Please check your email and contact them or the authorities immediately.</Say></Response>`,
-        to: contact.phone,
+        to: formattedPhone,
         from: TWILIO_PHONE_NUMBER,
       });
       callsMade++;
@@ -135,3 +158,4 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`SOS Backend server listening on port ${port}`);
 });
+
