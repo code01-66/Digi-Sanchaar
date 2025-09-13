@@ -97,6 +97,8 @@ app.post('/api/trigger-sos', async (req, res) => {
   // 3. Send Notifications
   let emailsSent = 0;
   let callsMade = 0;
+  let emailErrors = 0;
+  let callErrors = 0;
   const googleMapsUrl = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
   const userName = user.name || 'A DigiSanchaar user';
 
@@ -124,6 +126,7 @@ app.post('/api/trigger-sos', async (req, res) => {
       console.log(`Email sent successfully to ${contact.email}. ID: ${data?.id}`);
     } catch (error: any) {
       console.error(`Failed to send email to ${contact.email}. Full error:`, JSON.stringify(error, null, 2));
+      emailErrors++;
     }
 
     // Make Call via Twilio
@@ -139,10 +142,11 @@ app.post('/api/trigger-sos', async (req, res) => {
       console.log(`Call made to ${contact.phone}`);
     } catch (error) {
       console.error(`Failed to make call to ${contact.phone}:`, error);
+      callErrors++;
     }
   }
 
-  const responseMessage = `SOS processed. Emailed ${emailsSent} contacts. Called ${callsMade} contacts.`;
+  const responseMessage = `SOS processed. Emailed ${emailsSent} contacts (${emailErrors} failed). Called ${callsMade} contacts (${callErrors} failed).`;
   console.log(responseMessage);
   res.status(200).json({
     status: 'Success',
@@ -158,4 +162,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`SOS Backend server listening on port ${port}`);
 });
-
