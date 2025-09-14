@@ -5,6 +5,7 @@ import cors from 'cors';
 import { z } from 'zod';
 import { Twilio } from 'twilio';
 import { Resend } from 'resend';
+import webpush from 'web-push';
 
 dotenv.config();
 
@@ -14,7 +15,23 @@ const port = process.env.PORT || 3001;
 app.use(express.json());
 app.use(cors());
 
-// --- Zod Schema for validation ---
+// --- VAPID Keys for Web Push ---
+const publicVapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+const privateVapidKey = process.env.VAPID_PRIVATE_KEY;
+
+if (publicVapidKey && privateVapidKey) {
+  webpush.setVapidDetails(
+    'mailto:your-email@example.com', // Replace with your email
+    publicVapidKey,
+    privateVapidKey
+  );
+  console.log('VAPID keys configured for web-push.');
+} else {
+  console.warn('VAPID keys are not set. Push notifications will be disabled.');
+}
+
+
+// --- Zod Schemas for validation ---
 const EmergencyContactSchema = z.object({
   name: z.string(),
   phone: z.string(),
@@ -37,6 +54,15 @@ const SosRequestSchema = z.object({
   }),
 });
 
+const PushSubscriptionSchema = z.object({
+    endpoint: z.string().url(),
+    keys: z.object({
+        p256dh: z.string(),
+        auth: z.string(),
+    }),
+});
+
+
 // --- Helper function to format phone numbers ---
 const formatPhoneNumber = (phone: string) => {
     // If it already starts with a +, assume it's in the correct E.164 format
@@ -50,7 +76,38 @@ const formatPhoneNumber = (phone: string) => {
 };
 
 
-// --- API Endpoint ---
+// --- API Endpoints ---
+
+app.post('/api/save-subscription', (req, res) => {
+    const subscriptionValidation = PushSubscriptionSchema.safeParse(req.body);
+
+    if (!subscriptionValidation.success) {
+        console.error('Invalid push subscription object received:', subscriptionValidation.error);
+        return res.status(400).json({ status: 'Error', message: 'Invalid subscription object.' });
+    }
+
+    const subscription = subscriptionValidation.data;
+
+    // TODO: In a real app, you would save this subscription object to the user's profile in Firestore.
+    // For now, we'll just log it to confirm it's working.
+    console.log('Received Push Subscription:', JSON.stringify(subscription, null, 2));
+    
+    // Send a confirmation push notification
+    const payload = JSON.stringify({ title: 'DigiSanchaar', body: 'You are now subscribed to community alerts!' });
+
+    if (publicVapidKey && privateVapidKey) {
+        webpush.sendNotification(subscription, payload).then(() => {
+            res.status(201).json({ status: 'Success', message: 'Subscription saved and confirmation sent.' });
+        }).catch(error => {
+            console.error('Error sending confirmation push notification:', error);
+            res.status(500).json({ status: 'Error', message: 'Failed to send confirmation push.' });
+        });
+    } else {
+        res.status(201).json({ status: 'Success', message: 'Subscription received but VAPID keys not configured to send confirmation.' });
+    }
+});
+
+
 app.post('/api/trigger-sos', async (req, res) => {
   console.log('Received SOS request...');
 
@@ -75,7 +132,7 @@ app.post('/api/trigger-sos', async (req, res) => {
     TWILIO_AUTH_TOKEN,
     TWILIO_PHONE_NUMBER,
     RESEND_API_KEY,
-    RESEND_FROM_EMAIL, // New optional variable
+    RESEND_FROM_EMAIL, // This can be optional now
   } = process.env;
 
   if (
@@ -92,6 +149,7 @@ app.post('/api/trigger-sos', async (req, res) => {
 
   const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
   const resendClient = new Resend(RESEND_API_KEY);
+  // Provide a safe fallback if RESEND_FROM_EMAIL is not set
   const fromEmail = RESEND_FROM_EMAIL || 'DigiSanchaar Alert <onboarding@resend.dev>';
 
 
@@ -137,7 +195,7 @@ app.post('/api/trigger-sos', async (req, res) => {
       await twilioClient.calls.create({
         twiml: `<Response><Say>Urgent alert from DigiSanchaar. ${userName} has triggered an SOS. Please check your email for details.</Say></Response>`,
         to: formattedPhone,
-        from: TWILIO_PHONE_NUMBER,
+        from: `+${TWILIO_PHONE_NUMBER.replace(/\D/g, '')}`,
       });
       callsMade++;
       console.log(`Call made to ${contact.phone}`);
@@ -146,6 +204,8 @@ app.post('/api/trigger-sos', async (req, res) => {
       callErrors++;
     }
   }
+  
+  // TODO: Find nearby users and send push notifications.
 
   const responseMessage = `SOS processed. Emailed ${emailsSent} contacts (${emailErrors} failed). Called ${callsMade} contacts (${callErrors} failed).`;
   console.log(responseMessage);
@@ -163,4 +223,5 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`SOS Backend server listening on port ${port}`);
 });
+
 
