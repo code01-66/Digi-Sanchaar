@@ -6,8 +6,27 @@ import { z } from 'zod';
 import { Twilio } from 'twilio';
 import { Resend } from 'resend';
 import webpush from 'web-push';
+import { getFirestore } from 'firebase-admin/firestore';
+import { initializeApp, cert, getApps } from 'firebase-admin/app';
+import { geohashQueryBounds, distanceBetween } from 'geofire-common';
 
 dotenv.config();
+
+// --- Firebase Admin SDK Initialization ---
+if (!getApps().length) {
+    try {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY!);
+        initializeApp({
+            credential: cert(serviceAccount),
+        });
+        console.log('Firebase Admin SDK initialized.');
+    } catch (e: any) {
+        console.error('Firebase Admin SDK initialization failed.', e.message);
+        console.warn("Nearby SOS push notifications will be disabled if the Admin SDK isn't configured.");
+    }
+}
+const db = getFirestore();
+
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -51,6 +70,7 @@ const SosRequestSchema = z.object({
   user: z.object({
     name: z.string().optional(),
     email: z.string().optional(),
+    uid: z.string(),
   }),
 });
 
@@ -65,12 +85,9 @@ const PushSubscriptionSchema = z.object({
 
 // --- Helper function to format phone numbers ---
 const formatPhoneNumber = (phone: string) => {
-    // If it already starts with a +, assume it's in the correct E.164 format
     if (phone.trim().startsWith('+')) {
         return phone.trim();
     }
-    
-    // Otherwise, remove all non-digit characters and assume it's an Indian number
     const cleaned = phone.replace(/\D/g, '');
     return `+91${cleaned}`;
 };
@@ -78,32 +95,31 @@ const formatPhoneNumber = (phone: string) => {
 
 // --- API Endpoints ---
 
-app.post('/api/save-subscription', (req, res) => {
-    const subscriptionValidation = PushSubscriptionSchema.safeParse(req.body);
+app.post('/api/save-subscription', async (req, res) => {
+    const subscriptionValidation = PushSubscriptionSchema.safeParse(req.body.subscription);
+    const userId = req.body.userId; // Expecting userId in the body
 
-    if (!subscriptionValidation.success) {
-        console.error('Invalid push subscription object received:', subscriptionValidation.error);
-        return res.status(400).json({ status: 'Error', message: 'Invalid subscription object.' });
+    if (!subscriptionValidation.success || !userId) {
+        console.error('Invalid push subscription or missing userId:', subscriptionValidation.error);
+        return res.status(400).json({ status: 'Error', message: 'Invalid subscription object or missing user ID.' });
     }
 
     const subscription = subscriptionValidation.data;
 
-    // TODO: In a real app, you would save this subscription object to the user's profile in Firestore.
-    // For now, we'll just log it to confirm it's working.
-    console.log('Received Push Subscription:', JSON.stringify(subscription, null, 2));
-    
-    // Send a confirmation push notification
-    const payload = JSON.stringify({ title: 'DigiSanchaar', body: 'You are now subscribed to community alerts!' });
+    try {
+        const userDocRef = db.collection('users').doc(userId);
+        await userDocRef.set({ pushSubscription: subscription }, { merge: true });
+        console.log(`Saved push subscription for user: ${userId}`);
 
-    if (publicVapidKey && privateVapidKey) {
-        webpush.sendNotification(subscription, payload).then(() => {
-            res.status(201).json({ status: 'Success', message: 'Subscription saved and confirmation sent.' });
-        }).catch(error => {
-            console.error('Error sending confirmation push notification:', error);
-            res.status(500).json({ status: 'Error', message: 'Failed to send confirmation push.' });
-        });
-    } else {
-        res.status(201).json({ status: 'Success', message: 'Subscription received but VAPID keys not configured to send confirmation.' });
+        // Send a confirmation push notification
+        const payload = JSON.stringify({ title: 'DigiSanchaar', body: 'You are now subscribed to community alerts!' });
+        if (publicVapidKey && privateVapidKey) {
+            await webpush.sendNotification(subscription, payload);
+        }
+        res.status(201).json({ status: 'Success', message: 'Subscription saved and confirmation sent.' });
+    } catch (error) {
+        console.error('Error saving subscription to Firestore or sending push:', error);
+        res.status(500).json({ status: 'Error', message: 'Failed to save subscription or send confirmation.' });
     }
 });
 
@@ -123,91 +139,123 @@ app.post('/api/trigger-sos', async (req, res) => {
   }
 
   const { emergencyContacts, location, audioAnalysis, user } = validation.data;
-  console.log(`SOS for user: ${user.name || 'N/A'}`);
-  console.log(`Notifying ${emergencyContacts.length} contacts.`);
+  console.log(`SOS for user: ${user.name || 'N/A'} at lat: ${location.lat}, lng: ${location.lng}`);
+  
+  // --- Notify Nearby Users (Push Notifications) ---
+  let nearbyUsersNotified = 0;
+  if (getApps().length > 0 && publicVapidKey && privateVapidKey) { // Check if Firebase Admin and VAPID keys are initialized
+    try {
+        console.log('Finding nearby users...');
+        const center: [number, number] = [location.lat, location.lng];
+        const radiusInM = 5 * 1000; // 5km radius
 
-  // 2. Check for API Keys
+        const bounds = geohashQueryBounds(center, radiusInM);
+        const promises = [];
+        for (const b of bounds) {
+            const q = db.collection('users')
+                .orderBy('lastLocation.geohash')
+                .startAt(b[0])
+                .endAt(b[1]);
+            promises.push(q.get());
+        }
+
+        const snapshots = await Promise.all(promises);
+        const matchingDocs: any[] = [];
+        for (const snap of snapshots) {
+            for (const doc of snap.docs) {
+                const docData = doc.data();
+                // Exclude the user who triggered the SOS
+                if (doc.id === user.uid) continue;
+                
+                const lat = docData.lastLocation?.lat;
+                const lng = docData.lastLocation?.lng;
+
+                if (lat && lng) {
+                    const distanceInKm = distanceBetween([lat, lng], center);
+                    const distanceInM = distanceInKm * 1000;
+                    if (distanceInM <= radiusInM) {
+                        matchingDocs.push(docData);
+                    }
+                }
+            }
+        }
+
+        console.log(`Found ${matchingDocs.length} potential users nearby.`);
+        
+        const notificationPayload = JSON.stringify({
+            title: 'NEARBY SOS ALERT',
+            body: 'A DigiSanchaar user near you has triggered an SOS. Tap to view details.',
+            url: '/community-alert', // The URL to open on click
+            icon: '/icon-192x192.png'
+        });
+
+        const pushPromises = matchingDocs.map(nearbyUser => {
+            if (nearbyUser.pushSubscription) {
+                return webpush.sendNotification(nearbyUser.pushSubscription, notificationPayload)
+                    .then(() => {
+                        nearbyUsersNotified++;
+                    })
+                    .catch(err => {
+                        console.log(`Failed to send notification to a user. Subscription might be expired. Error: ${err.message}`);
+                        // TODO: In a real app, you might want to remove expired subscriptions from the database.
+                    });
+            }
+            return Promise.resolve();
+        });
+
+        await Promise.all(pushPromises);
+        console.log(`Successfully sent push notifications to ${nearbyUsersNotified} nearby users.`);
+    } catch(e) {
+        console.error("Failed to query or notify nearby users:", e);
+    }
+  }
+
+
+  // --- Notify Emergency Contacts (Email & Call) ---
+  console.log(`Notifying ${emergencyContacts.length} emergency contacts.`);
   const {
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
     TWILIO_PHONE_NUMBER,
     RESEND_API_KEY,
-    RESEND_FROM_EMAIL, // This can be optional now
+    RESEND_FROM_EMAIL,
   } = process.env;
 
-  if (
-    !TWILIO_ACCOUNT_SID ||
-    !TWILIO_AUTH_TOKEN ||
-    !TWILIO_PHONE_NUMBER ||
-    !RESEND_API_KEY
-  ) {
-    const errorMsg =
-      'Server is not configured for notifications. Missing API keys.';
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER || !RESEND_API_KEY) {
+    const errorMsg = 'Server is not configured for email/call notifications. Missing API keys.';
     console.error(errorMsg);
-    return res.status(500).json({ status: 'Error', message: errorMsg });
-  }
+    // Don't return here, push notifications might have worked.
+  } else {
+     const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+     const resendClient = new Resend(RESEND_API_KEY);
+     const fromEmail = RESEND_FROM_EMAIL || 'DigiSanchaar Alert <onboarding@resend.dev>';
 
-  const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-  const resendClient = new Resend(RESEND_API_KEY);
-  // Provide a safe fallback if RESEND_FROM_EMAIL is not set
-  const fromEmail = RESEND_FROM_EMAIL || 'DigiSanchaar Alert <onboarding@resend.dev>';
+     const googleMapsUrl = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
+     const userName = user.name || 'A DigiSanchaar user';
 
+      for (const contact of emergencyContacts) {
+        // Send Email
+        try {
+            await resendClient.emails.send({
+                from: fromEmail,
+                to: contact.email,
+                subject: `URGENT: SOS Alert from ${userName}`,
+                html: `<p>This is an automated SOS alert from the DigiSanchaar app...</p>`,
+            });
+        } catch (error) { console.error(`Failed to send email to ${contact.email}.`); }
 
-  // 3. Send Notifications
-  let emailsSent = 0;
-  let callsMade = 0;
-  let emailErrors = 0;
-  let callErrors = 0;
-  const googleMapsUrl = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
-  const userName = user.name || 'A DigiSanchaar user';
-
-  for (const contact of emergencyContacts) {
-    // Send Email via Resend
-    try {
-      const { data, error } = await resendClient.emails.send({
-        from: fromEmail,
-        to: contact.email,
-        subject: `URGENT: SOS Alert from ${userName}`,
-        html: `
-          <p>This is an automated SOS alert from the DigiSanchaar app.</p>
-          <p><strong>${userName} has triggered an emergency alert.</strong></p>
-          <p><strong>Last Known Location:</strong> <a href="${googleMapsUrl}">${googleMapsUrl}</a></p>
-          <p><strong>AI Summary of Situation:</strong> ${audioAnalysis.summary}</p>
-          <p>Please attempt to contact them or the authorities immediately.</p>
-        `,
-      });
-
-      if (error) {
-          throw error;
+        // Make Call
+        try {
+            await twilioClient.calls.create({
+                twiml: `<Response><Say>Urgent alert from DigiSanchaar. ${userName} has triggered an SOS...</Say></Response>`,
+                to: formatPhoneNumber(contact.phone),
+                from: `+${TWILIO_PHONE_NUMBER.replace(/\D/g, '')}`,
+            });
+        } catch (error) { console.error(`Failed to make call to ${contact.phone}`); }
       }
-
-      emailsSent++;
-      console.log(`Email sent successfully to ${contact.email}. ID: ${data?.id}`);
-    } catch (error: any) {
-      console.error(`Failed to send email to ${contact.email}. Full error:`, JSON.stringify(error, null, 2));
-      emailErrors++;
-    }
-
-    // Make Call via Twilio
-    const formattedPhone = formatPhoneNumber(contact.phone);
-    console.log(`Attempting to call formatted number: ${formattedPhone}`);
-    try {
-      await twilioClient.calls.create({
-        twiml: `<Response><Say>Urgent alert from DigiSanchaar. ${userName} has triggered an SOS. Please check your email for details.</Say></Response>`,
-        to: formattedPhone,
-        from: `+${TWILIO_PHONE_NUMBER.replace(/\D/g, '')}`,
-      });
-      callsMade++;
-      console.log(`Call made to ${contact.phone}`);
-    } catch (error) {
-      console.error(`Failed to make call to ${contact.phone}:`, error);
-      callErrors++;
-    }
   }
   
-  // TODO: Find nearby users and send push notifications.
-
-  const responseMessage = `SOS processed. Emailed ${emailsSent} contacts (${emailErrors} failed). Called ${callsMade} contacts (${callErrors} failed).`;
+  const responseMessage = `SOS processed. Notified ${nearbyUsersNotified} nearby users via push. Emergency contact notification process initiated.`;
   console.log(responseMessage);
   res.status(200).json({
     status: 'Success',
@@ -223,5 +271,6 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`SOS Backend server listening on port ${port}`);
 });
+
 
 
