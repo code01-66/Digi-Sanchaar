@@ -13,19 +13,27 @@ import { geohashQueryBounds, distanceBetween } from 'geofire-common';
 dotenv.config();
 
 // --- Firebase Admin SDK Initialization ---
-if (!getApps().length) {
-    try {
-        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY!);
-        initializeApp({
-            credential: cert(serviceAccount),
-        });
-        console.log('Firebase Admin SDK initialized.');
-    } catch (e: any) {
-        console.error('Firebase Admin SDK initialization failed.', e.message);
-        console.warn("Nearby SOS push notifications will be disabled if the Admin SDK isn't configured.");
+let db: import('firebase-admin/firestore').Firestore;
+let firebaseInitialized = false;
+
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+    if (!getApps().length) {
+      initializeApp({
+        credential: cert(serviceAccount),
+      });
+      console.log('Firebase Admin SDK initialized.');
     }
+    db = getFirestore();
+    firebaseInitialized = true;
+  } else {
+    console.error('FIREBASE_SERVICE_ACCOUNT_KEY is not set. Firebase features will be disabled.');
+  }
+} catch (e: any) {
+  console.error('Firebase Admin SDK initialization failed.', e.message);
+  console.warn("Nearby SOS push notifications will be disabled due to initialization failure.");
 }
-const db = getFirestore();
 
 
 const app = express();
@@ -96,6 +104,10 @@ const formatPhoneNumber = (phone: string) => {
 // --- API Endpoints ---
 
 app.post('/api/save-subscription', async (req, res) => {
+    if (!firebaseInitialized) {
+        return res.status(503).json({ status: 'Error', message: 'Service unavailable: Firebase not configured.' });
+    }
+    
     const subscriptionValidation = PushSubscriptionSchema.safeParse(req.body.subscription);
     const userId = req.body.userId; // Expecting userId in the body
 
@@ -143,7 +155,7 @@ app.post('/api/trigger-sos', async (req, res) => {
   
   // --- Notify Nearby Users (Push Notifications) ---
   let nearbyUsersNotified = 0;
-  if (getApps().length > 0 && publicVapidKey && privateVapidKey) { // Check if Firebase Admin and VAPID keys are initialized
+  if (firebaseInitialized && publicVapidKey && privateVapidKey) {
     try {
         console.log('Finding nearby users...');
         const center: [number, number] = [location.lat, location.lng];
@@ -221,41 +233,69 @@ app.post('/api/trigger-sos', async (req, res) => {
     RESEND_FROM_EMAIL,
   } = process.env;
 
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER || !RESEND_API_KEY) {
-    const errorMsg = 'Server is not configured for email/call notifications. Missing API keys.';
+  const areApiKeysMissing = !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER || !RESEND_API_KEY || !RESEND_FROM_EMAIL;
+
+  if (areApiKeysMissing) {
+    const errorMsg = 'Server is not configured for email/call notifications. One or more API keys are missing in environment variables (Twilio SID, Auth Token, Phone Number, Resend API Key, or Resend From Email).';
     console.error(errorMsg);
-    // Don't return here, push notifications might have worked.
+    // Don't return here, but include this in the final response message.
   } else {
      const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
      const resendClient = new Resend(RESEND_API_KEY);
-     const fromEmail = RESEND_FROM_EMAIL || 'DigiSanchaar Alert <onboarding@resend.dev>';
-
+     
      const googleMapsUrl = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
      const userName = user.name || 'A DigiSanchaar user';
+     const situationSummary = audioAnalysis.summary || 'The user has triggered an SOS alert.';
+
+     const callMessage = `Urgent alert from DigiSanchaar. ${userName} has triggered an SOS. Situation summary: ${situationSummary}. Location is available via email.`;
+     const emailBody = `
+        <h1>Urgent SOS Alert from ${userName}</h1>
+        <p>This is an automated SOS alert from the DigiSanchaar application.</p>
+        <p><b>User:</b> ${userName}</p>
+        <p><b>AI Situation Summary:</b> ${situationSummary}</p>
+        <p><b>Keywords Detected:</b> ${audioAnalysis.keywords.join(', ') || 'None'}</p>
+        <p><b>Last Known Location:</b></p>
+        <p><a href="${googleMapsUrl}" target="_blank">Click here to view on Google Maps</a></p>
+        <p>Coordinates: ${location.lat}, ${location.lng}</p>
+        <br/>
+        <p>Please take appropriate action and contact authorities if necessary.</p>
+     `;
 
       for (const contact of emergencyContacts) {
         // Send Email
         try {
             await resendClient.emails.send({
-                from: fromEmail,
+                from: RESEND_FROM_EMAIL!,
                 to: contact.email,
                 subject: `URGENT: SOS Alert from ${userName}`,
-                html: `<p>This is an automated SOS alert from the DigiSanchaar app...</p>`,
+                html: emailBody,
             });
-        } catch (error) { console.error(`Failed to send email to ${contact.email}.`); }
+            console.log(`Successfully sent email to ${contact.email}`);
+        } catch (error: any) {
+            console.error(`Failed to send email to ${contact.email}. Error: ${error.message}`);
+        }
 
         // Make Call
         try {
             await twilioClient.calls.create({
-                twiml: `<Response><Say>Urgent alert from DigiSanchaar. ${userName} has triggered an SOS...</Say></Response>`,
+                twiml: `<Response><Say>${callMessage}</Say></Response>`,
                 to: formatPhoneNumber(contact.phone),
-                from: `+${TWILIO_PHONE_NUMBER.replace(/\D/g, '')}`,
+                from: `+${TWILIO_PHONE_NUMBER!.replace(/\D/g, '')}`,
             });
-        } catch (error) { console.error(`Failed to make call to ${contact.phone}`); }
+             console.log(`Successfully initiated call to ${contact.phone}`);
+        } catch (error: any) {
+            console.error(`Failed to make call to ${contact.phone}. Error: ${error.message}`);
+        }
       }
   }
   
-  const responseMessage = `SOS processed. Notified ${nearbyUsersNotified} nearby users via push. Emergency contact notification process initiated.`;
+  let responseMessage = `SOS processed. Notified ${nearbyUsersNotified} nearby users via push.`;
+  if (areApiKeysMissing) {
+    responseMessage += " Emergency contact notifications were skipped due to missing server configuration.";
+  } else {
+    responseMessage += " Emergency contact notification process initiated.";
+  }
+
   console.log(responseMessage);
   res.status(200).json({
     status: 'Success',
@@ -271,6 +311,7 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`SOS Backend server listening on port ${port}`);
 });
+
 
 
 
