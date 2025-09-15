@@ -1,6 +1,8 @@
 
-import express from 'express';
 import dotenv from 'dotenv';
+dotenv.config();
+
+import express from 'express';
 import cors from 'cors';
 import { z } from 'zod';
 import { Twilio } from 'twilio';
@@ -9,8 +11,6 @@ import webpush from 'web-push';
 import { getFirestore } from 'firebase-admin/firestore';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { geohashQueryBounds, distanceBetween } from 'geofire-common';
-
-dotenv.config();
 
 // --- Firebase Admin SDK Initialization ---
 let db: import('firebase-admin/firestore').Firestore;
@@ -311,7 +311,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`SOS Backend server listening on port ${port}`);
 });
-
-
-
-
