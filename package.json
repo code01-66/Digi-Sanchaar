@@ -1,3 +1,4 @@
+
 {
   "name": "sos-backend",
   "version": "1.0.0",
@@ -6,7 +7,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "postinstall": "npm run build"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +17,8 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "firebase-admin": "^12.1.1",
+    "geofire-common": "^6.0.0",
     "resend": "^3.2.0",
     "twilio": "^5.2.2",
     "web-push": "^3.6.7",
@@ -29,4 +33,5 @@
     "typescript": "^5.4.5"
   }
 }
+
 
