@@ -8,16 +8,16 @@ import { z } from 'zod';
 import { Twilio } from 'twilio';
 import { Resend } from 'resend';
 import webpush from 'web-push';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, Firestore } from 'firebase-admin/firestore';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { geohashQueryBounds, distanceBetween } from 'geofire-common';
 
 // --- Firebase Admin SDK Initialization ---
-let db: import('firebase-admin/firestore').Firestore;
+let db: Firestore;
 let firebaseInitialized = false;
 
 try {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY && process.env.FIREBASE_SERVICE_ACCOUNT_KEY !== "undefined") {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
     if (!getApps().length) {
       initializeApp({
@@ -28,10 +28,10 @@ try {
     db = getFirestore();
     firebaseInitialized = true;
   } else {
-    console.error('FIREBASE_SERVICE_ACCOUNT_KEY is not set. Firebase features will be disabled.');
+    console.warn('FIREBASE_SERVICE_ACCOUNT_KEY is not set. Firebase-dependent features (like nearby user notifications) will be disabled.');
   }
 } catch (e: any) {
-  console.error('Firebase Admin SDK initialization failed.', e.message);
+  console.error('Firebase Admin SDK initialization failed:', e.message);
   console.warn("Nearby SOS push notifications will be disabled due to initialization failure.");
 }
 
@@ -311,3 +311,4 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`SOS Backend server listening on port ${port}`);
 });
+
