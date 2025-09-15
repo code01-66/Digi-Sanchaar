@@ -1,22 +1,38 @@
+
 "use strict";
 
-// This is the "Offline copy of pages" service worker
-
-const CACHE = "digisanchaar-pwa-cache";
-
-// TODO: replace the following with the correct offline fallback page
-const OFFLINE_URL = "offline.html";
+const CACHE_NAME = "digisanchaar-pwa-cache-v1";
+const PRECACHE_ASSETS = [
+  '/',
+  '/dashboard',
+  '/icon-192x192.png',
+  '/icon-512x512.png',
+  '/manifest.json'
+];
 
 self.addEventListener("install", function (event) {
   event.waitUntil(
-    caches.open(CACHE).then(function (cache) {
-      return cache.add(new Request(OFFLINE_URL, { cache: "reload" }));
+    caches.open(CACHE_NAME).then(function (cache) {
+      console.log('Service Worker: Caching pre-cache assets');
+      return cache.addAll(PRECACHE_ASSETS);
+    }).catch(err => {
+      console.error('Service Worker: Pre-caching failed:', err);
     })
   );
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches.keys().then(keys => {
+      return Promise.all(keys.map(key => {
+        if (key !== CACHE_NAME) {
+          return caches.delete(key);
+        }
+      }));
+    }).then(() => {
+      return self.clients.claim();
+    })
+  );
 });
 
 
@@ -25,20 +41,35 @@ self.addEventListener("fetch", function (event) {
     event.respondWith(
       (async () => {
         try {
-          const preloadResp = await event.preloadResponse;
-
-          if (preloadResp) {
-            return preloadResp;
+          const networkResponse = await fetch(event.request);
+          // If the network response is successful, clone it and cache it for future use.
+          if (networkResponse.ok) {
+            const cache = await caches.open(CACHE_NAME);
+            cache.put(event.request, networkResponse.clone());
           }
-
-          const networkResp = await fetch(event.request);
-          return networkResp;
+          return networkResponse;
         } catch (error) {
-          const cache = await caches.open(CACHE);
-          const cachedResp = await cache.match(OFFLINE_URL);
-          return cachedResp;
+          // If the network fails, try to serve the request from the cache.
+          const cache = await caches.open(CACHE_NAME);
+          const cachedResponse = await cache.match(event.request);
+          if (cachedResponse) {
+            return cachedResponse;
+          }
+          // If the specific page isn't in the cache, serve the main '/' page as a fallback.
+          return await cache.match('/');
         }
       })()
+    );
+  } else {
+    // For non-navigation requests (like CSS, JS, images), use a cache-first strategy.
+     event.respondWith(
+      caches.match(event.request).then(response => {
+        return response || fetch(event.request).then(fetchResponse => {
+            const cache = caches.open(CACHE_NAME);
+            cache.then(c => c.put(event.request, fetchResponse.clone()));
+            return fetchResponse;
+        });
+      })
     );
   }
 });
@@ -82,3 +113,5 @@ self.addEventListener('notificationclick', function(event) {
     })
   );
 });
+
+
